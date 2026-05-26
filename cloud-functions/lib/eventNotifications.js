@@ -69,9 +69,26 @@ async function gatherMessagesForEvent(db, eventDoc) {
 }
 async function sendMessagesOrThrow(messages) {
     const chunks = expo.chunkPushNotifications(messages);
+    let sentChunks = 0;
+    let failedChunks = 0;
     for (const chunk of chunks) {
-        await expo.sendPushNotificationsAsync(chunk);
+        try {
+            await expo.sendPushNotificationsAsync(chunk);
+            sentChunks += 1;
+        }
+        catch (error) {
+            failedChunks += 1;
+            console.error('Failed to send notification chunk', {
+                chunkSize: chunk.length,
+                error,
+            });
+        }
     }
+    return {
+        sentChunks,
+        failedChunks,
+        allChunksSucceeded: failedChunks === 0,
+    };
 }
 exports.checkUpcomingEvents = functions.pubsub.schedule('every 1 minutes').onRun(async () => {
     const db = admin.firestore();
@@ -92,9 +109,16 @@ exports.checkUpcomingEvents = functions.pubsub.schedule('every 1 minutes').onRun
         const msgs = await gatherMessagesForEvent(db, eventDoc);
         if (msgs.length === 0)
             continue;
-        await sendMessagesOrThrow(msgs);
-        successfulEventRefs.push(eventDoc.ref);
-        totalMessages += msgs.length;
+        try {
+            const result = await sendMessagesOrThrow(msgs);
+            if (result.allChunksSucceeded) {
+                successfulEventRefs.push(eventDoc.ref);
+                totalMessages += msgs.length;
+            }
+        }
+        catch (error) {
+            console.error('Unexpected error while sending notifications for event', eventDoc.id, error);
+        }
     }
     for (const ref of successfulEventRefs) {
         batch.update(ref, { notified10Min: true });

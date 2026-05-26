@@ -10,7 +10,7 @@ export async function fetchParticipantsOnce(db, eventId) {
     let entry = registry.get(key);
     const now = Date.now();
 
-    if (entry && entry.data && entry.lastFetched && now - entry.lastFetched < TTL_MS) {
+    if (entry?.data && entry?.lastFetched && now - entry.lastFetched < TTL_MS) {
         return entry.data;
     }
 
@@ -29,11 +29,14 @@ export async function fetchParticipantsOnce(db, eventId) {
         registry.set(key, entry);
     }
 
-    entry.fetchPromise = getDocs(collection(db, `events/${eventId}/participants`))
+    const fetchPromise = getDocs(collection(db, `events/${eventId}/participants`))
         .then(snap => {
-            const arr = snap.docs.map(d => ({ id: d.id, ...(d.data() || {}) }));
+            const arr = snap.docs.map(d => {
+                const data = d.data();
+                return data ? { id: d.id, ...data } : { id: d.id };
+            });
             const current = registry.get(key);
-            if (current) {
+            if (current?.fetchPromise === fetchPromise) {
                 current.data = arr;
                 current.lastFetched = Date.now();
                 current.fetchPromise = null;
@@ -42,11 +45,13 @@ export async function fetchParticipantsOnce(db, eventId) {
         })
         .catch(error => {
             const current = registry.get(key);
-            if (current?.fetchPromise) {
+            if (current?.fetchPromise === fetchPromise) {
                 current.fetchPromise = null;
             }
             throw error;
         });
+
+    entry.fetchPromise = fetchPromise;
 
     return entry.fetchPromise;
 }
@@ -77,7 +82,10 @@ export function subscribeParticipants(db, eventId, onChange) {
         const unsub = onSnapshot(
             collection(db, `events/${eventId}/participants`),
             snap => {
-                const arr = snap.docs.map(d => ({ id: d.id, ...(d.data() || {}) }));
+                const arr = snap.docs.map(d => {
+                    const data = d.data();
+                    return data ? { id: d.id, ...data } : { id: d.id };
+                });
                 entry.data = arr;
                 entry.lastFetched = Date.now();
                 for (const cb of entry.subscribers) cb(arr);
