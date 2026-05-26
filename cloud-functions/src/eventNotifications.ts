@@ -7,7 +7,7 @@ const expo = new Expo();
 
 async function gatherMessagesForEvent(
     db: admin.firestore.Firestore,
-    eventDoc: FirebaseFirestore.QueryDocumentSnapshot,
+    eventDoc: admin.firestore.QueryDocumentSnapshot,
 ): Promise<any[]> {
     const eventData = eventDoc.data();
     if (eventData.notified10Min) return [];
@@ -41,6 +41,13 @@ async function gatherMessagesForEvent(
     return messages;
 }
 
+async function sendMessagesOrThrow(messages: any[]) {
+    const chunks = expo.chunkPushNotifications(messages);
+    for (const chunk of chunks) {
+        await expo.sendPushNotificationsAsync(chunk);
+    }
+}
+
 export const checkUpcomingEvents = functions.pubsub.schedule('every 1 minutes').onRun(async () => {
     const db = admin.firestore();
     const startRange = new Date(Date.now() + 10 * 60 * 1000).toISOString();
@@ -57,25 +64,19 @@ export const checkUpcomingEvents = functions.pubsub.schedule('every 1 minutes').
 
     const batch = db.batch();
     let totalMessages = 0;
+    const successfulEventRefs: admin.firestore.DocumentReference[] = [];
 
-    const allMessagesPromises = eventsSnapshot.docs.map(async eventDoc => {
+    for (const eventDoc of eventsSnapshot.docs) {
         const msgs = await gatherMessagesForEvent(db, eventDoc);
-        if (msgs.length > 0) batch.update(eventDoc.ref, { notified10Min: true });
+        if (msgs.length === 0) continue;
+
+        await sendMessagesOrThrow(msgs);
+        successfulEventRefs.push(eventDoc.ref);
         totalMessages += msgs.length;
-        return msgs;
-    });
+    }
 
-    const allMessagesArrays = await Promise.all(allMessagesPromises);
-    const messages = allMessagesArrays.flat();
-
-    // Send Notifications in chunks
-    const chunks = expo.chunkPushNotifications(messages);
-    for (const chunk of chunks) {
-        try {
-            await expo.sendPushNotificationsAsync(chunk);
-        } catch (error) {
-            console.error(error);
-        }
+    for (const ref of successfulEventRefs) {
+        batch.update(ref, { notified10Min: true });
     }
 
     await batch.commit();

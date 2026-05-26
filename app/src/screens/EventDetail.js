@@ -214,6 +214,8 @@ export default function EventDetail({ route, navigation }) {
                 const myDoc = list.find(d => d.id === user.uid);
                 if (myDoc) setRsvpStatus('going');
                 else setRsvpStatus(null);
+            } else {
+                setRsvpStatus(null);
             }
         });
 

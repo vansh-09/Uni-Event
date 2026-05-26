@@ -36,6 +36,7 @@ export async function sendCertificatesForEvent(eventId: string, ownerId: string)
     }
 
     const results = [];
+    let sentCount = 0;
 
     // 4. Process Each Participant
     for (const p of participants) {
@@ -96,6 +97,7 @@ export async function sendCertificatesForEvent(eventId: string, ownerId: string)
                 results.push({ email: p.email, status: 'failed', error });
             } else {
                 console.log(`Sent to ${p.email}`);
+                sentCount += 1;
                 results.push({ email: p.email, status: 'success', id: data?.id });
             }
         } catch (err) {
@@ -104,11 +106,13 @@ export async function sendCertificatesForEvent(eventId: string, ownerId: string)
         }
     }
 
-    // 5. Update Event Status
-    await admin.firestore().collection('events').doc(eventId).update({
-        certificatesSent: true,
-        certificatesSentAt: admin.firestore.FieldValue.serverTimestamp(),
-    });
+    // 5. Update Event Status only if at least one certificate was delivered
+    if (sentCount > 0) {
+        await admin.firestore().collection('events').doc(eventId).update({
+            certificatesSent: true,
+            certificatesSentAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+    }
 
-    return { total: participants.length, results };
+    return { total: participants.length, sentCount, results };
 }

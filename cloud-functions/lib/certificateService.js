@@ -1,79 +1,57 @@
-'use strict';
-var __createBinding =
-    (this && this.__createBinding) ||
-    (Object.create
-        ? function (o, m, k, k2) {
-              if (k2 === undefined) k2 = k;
-              var desc = Object.getOwnPropertyDescriptor(m, k);
-              if (!desc || ('get' in desc ? !m.__esModule : desc.writable || desc.configurable)) {
-                  desc = {
-                      enumerable: true,
-                      get: function () {
-                          return m[k];
-                      },
-                  };
-              }
-              Object.defineProperty(o, k2, desc);
-          }
-        : function (o, m, k, k2) {
-              if (k2 === undefined) k2 = k;
-              o[k2] = m[k];
-          });
-var __setModuleDefault =
-    (this && this.__setModuleDefault) ||
-    (Object.create
-        ? function (o, v) {
-              Object.defineProperty(o, 'default', { enumerable: true, value: v });
-          }
-        : function (o, v) {
-              o['default'] = v;
-          });
-var __importStar =
-    (this && this.__importStar) ||
-    (function () {
-        var ownKeys = function (o) {
-            ownKeys =
-                Object.getOwnPropertyNames ||
-                function (o) {
-                    var ar = [];
-                    for (var k in o)
-                        if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
-                    return ar;
-                };
-            return ownKeys(o);
+"use strict";
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
         };
-        return function (mod) {
-            if (mod && mod.__esModule) return mod;
-            var result = {};
-            if (mod != null)
-                for (var k = ownKeys(mod), i = 0; i < k.length; i++)
-                    if (k[i] !== 'default') __createBinding(result, mod, k[i]);
-            __setModuleDefault(result, mod);
-            return result;
-        };
-    })();
-Object.defineProperty(exports, '__esModule', { value: true });
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
+Object.defineProperty(exports, "__esModule", { value: true });
 exports.sendCertificatesForEvent = sendCertificatesForEvent;
-const admin = __importStar(require('firebase-admin'));
-const fs = __importStar(require('fs'));
-const path = __importStar(require('path'));
-const pdf_lib_1 = require('pdf-lib');
-const resend_1 = require('resend');
-const participants_1 = require('./lib/participants');
+const admin = __importStar(require("firebase-admin"));
+const fs = __importStar(require("fs"));
+const path = __importStar(require("path"));
+const pdf_lib_1 = require("pdf-lib");
+const resend_1 = require("resend");
+const participants_1 = require("./lib/participants");
 const resend = new resend_1.Resend(process.env.RESEND_API_KEY);
 async function sendCertificatesForEvent(eventId, ownerId) {
     // 1. Fetch Event Details
     const eventDoc = await admin.firestore().collection('events').doc(eventId).get();
-    if (!eventDoc.exists) throw new Error('Event not found');
+    if (!eventDoc.exists)
+        throw new Error('Event not found');
     const event = eventDoc.data();
     if ((event === null || event === void 0 ? void 0 : event.ownerId) !== ownerId) {
         throw new Error('Unauthorized: Only the event owner can send certificates.');
     }
     // 2. Fetch Participants (use shared helper)
-    const participants = await (0, participants_1.getParticipantContacts)(
-        admin.firestore(),
-        eventId,
-    );
+    const participants = await (0, participants_1.getParticipantContacts)(admin.firestore(), eventId);
     if (!participants || participants.length === 0)
         throw new Error('No participants registered for this event.');
     // 3. Load Template
@@ -82,16 +60,17 @@ async function sendCertificatesForEvent(eventId, ownerId) {
     let templateBytes;
     try {
         templateBytes = fs.readFileSync(templatePath);
-    } catch (e) {
-        throw new Error(
-            "Certificate Template not found. Please ensure 'assets/certificate_template.pdf' exists in cloud-functions.",
-        );
+    }
+    catch (e) {
+        throw new Error("Certificate Template not found. Please ensure 'assets/certificate_template.pdf' exists in cloud-functions.");
     }
     const results = [];
+    let sentCount = 0;
     // 4. Process Each Participant
     for (const p of participants) {
         try {
-            if (!p.email || !p.name) continue;
+            if (!p.email || !p.name)
+                continue;
             // Generate PDF
             const pdfDoc = await pdf_lib_1.PDFDocument.load(templateBytes);
             const pages = pdfDoc.getPages();
@@ -138,24 +117,25 @@ async function sendCertificatesForEvent(eventId, ownerId) {
             if (error) {
                 console.error(`Failed to send to ${p.email}:`, error);
                 results.push({ email: p.email, status: 'failed', error });
-            } else {
-                console.log(`Sent to ${p.email}`);
-                results.push({
-                    email: p.email,
-                    status: 'success',
-                    id: data === null || data === void 0 ? void 0 : data.id,
-                });
             }
-        } catch (err) {
+            else {
+                console.log(`Sent to ${p.email}`);
+                sentCount += 1;
+                results.push({ email: p.email, status: 'success', id: data === null || data === void 0 ? void 0 : data.id });
+            }
+        }
+        catch (err) {
             console.error(`Error processing ${p.email}:`, err);
             results.push({ email: p.email, status: 'error', error: err.message });
         }
     }
-    // 5. Update Event Status
-    await admin.firestore().collection('events').doc(eventId).update({
-        certificatesSent: true,
-        certificatesSentAt: admin.firestore.FieldValue.serverTimestamp(),
-    });
-    return { total: participants.length, results };
+    // 5. Update Event Status only if at least one certificate was delivered
+    if (sentCount > 0) {
+        await admin.firestore().collection('events').doc(eventId).update({
+            certificatesSent: true,
+            certificatesSentAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+    }
+    return { total: participants.length, sentCount, results };
 }
 //# sourceMappingURL=certificateService.js.map
