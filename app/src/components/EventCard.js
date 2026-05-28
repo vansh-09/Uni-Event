@@ -4,14 +4,14 @@ import { LinearGradient } from 'expo-linear-gradient';
 import {
     doc,
     getDoc,
+    updateDoc,
     onSnapshot,
     collection,
     query,
     where,
     getDocs,
-    updateDoc,
 } from 'firebase/firestore';
-import React, { useEffect, useState, memo } from 'react';
+import React, { useEffect, useRef, useState, memo } from 'react';
 import {
     Image,
     StyleSheet,
@@ -21,6 +21,7 @@ import {
     Switch,
     Platform,
     ActivityIndicator,
+    Alert,
 } from 'react-native';
 import { db } from '../lib/firebaseConfig';
 import { theme as globalTheme } from '../lib/theme';
@@ -52,8 +53,10 @@ const EventCard = memo(
         const [flyerLoaded, setFlyerLoaded] = useState(false);
         const [lookingForBuddy, setLookingForBuddy] = useState(false);
 
-        // 🔒 State tracking variable to implement frontend click locking (Issue #266 Task 4)
+        // 🔒 UI Loading State
         const [isProcessing, setIsProcessing] = useState(false);
+        // 🔒 Synchronous lock reference to block multi-taps inside the same render frame
+        const isProcessingRef = useRef(false);
 
         useEffect(() => {
             if (!isRegistered || !user || !event?.id) return;
@@ -90,27 +93,6 @@ const EventCard = memo(
             }
         };
 
-        // 🚀 Task 4 implementation handler block
-        const handleRegisterPress = async () => {
-            if (isProcessing || !user || !event?.id) return;
-
-            // Freeze the interactive element layout layout immediately on the very first touch action
-            setIsProcessing(true);
-
-            try {
-                // Call our atomic transaction validator engine
-                await safeToggleEventAction(db, user.uid, event.id, true);
-
-                // Route navigation to primary view detail upon confirmation mapping clear
-                navigation.navigate('EventDetail', { eventId: event.id });
-            } catch (error) {
-                console.error('Spam button trigger rejected processing error:', error);
-            } finally {
-                // Release the interaction lock state layer
-                setIsProcessing(false);
-            }
-        };
-
         useEffect(() => {
             setBannerLoaded(false);
         }, [event?.bannerUrl]);
@@ -128,6 +110,28 @@ const EventCard = memo(
                 });
             }
         }, [event?.ownerId, event?.organization]);
+
+        // 🚀 Gated same-frame input execution track blocker handler
+        const handleRegisterPress = async () => {
+            if (isProcessingRef.current || !user || !event?.id) return;
+
+            isProcessingRef.current = true;
+            setIsProcessing(true);
+
+            try {
+                await safeToggleEventAction(db, user.uid, event.id, true);
+                navigation.navigate('EventDetail', { eventId: event.id });
+            } catch (error) {
+                console.error('Spam button trigger rejected processing error:', error);
+                Alert.alert(
+                    'Registration Failed',
+                    'Unable to register for this event. Please verify your internet connection and try again.'
+                );
+            } finally {
+                isProcessingRef.current = false;
+                setIsProcessing(false);
+            }
+        };
 
         if (!event) return null;
 
@@ -151,7 +155,7 @@ const EventCard = memo(
                 activeOpacity={0.9}
                 onPress={() => navigation.navigate('EventDetail', { eventId: event.id })}
             >
-                {/* 1. MAIN BANNER IMAGE */}
+                {/* 1. MAIN BANNER IMAGE (Top Layer) */}
                 <View style={[styles.bannerContainer, isRecommended && { height: 140 }]}>
                     {!bannerLoaded && (
                         <ShimmerItem
@@ -176,12 +180,14 @@ const EventCard = memo(
                         colors={['transparent', 'rgba(0,0,0,0.4)']}
                         style={StyleSheet.absoluteFillObject}
                     />
+                    {/* Category Tag on Banner */}
                     <View style={[styles.categoryBadge, { backgroundColor: theme.colors.surface }]}>
                         <Text style={[styles.categoryText, { color: theme.colors.text }]}>
                             {event.category}
                         </Text>
                     </View>
 
+                    {/* Live / Online Badge */}
                     {isLive && (
                         <View style={[styles.onlineBadge, { backgroundColor: theme.colors.error }]}>
                             <Ionicons name="radio-button-on" size={12} color="#fff" />
@@ -197,6 +203,7 @@ const EventCard = memo(
                         </View>
                     )}
 
+                    {/* SUSPENDED Badge */}
                     {event.status === 'suspended' && (
                         <View style={[styles.onlineBadge, { backgroundColor: '#FF4444' }]}>
                             <Ionicons name="alert-circle" size={12} color="#fff" />
@@ -207,6 +214,7 @@ const EventCard = memo(
 
                 {/* 2. CONTENT CONTAINER */}
                 <View style={styles.contentContainer}>
+                    {/* FLYER IMAGE (Overlapping) */}
                     <View
                         style={[
                             styles.flyerContainer,
@@ -224,6 +232,7 @@ const EventCard = memo(
                         />
                     </View>
 
+                    {/* HEADER INFO (Right of Flyer) */}
                     <View style={styles.headerInfo}>
                         <Text
                             style={[styles.title, { color: theme.colors.text }]}
@@ -236,7 +245,9 @@ const EventCard = memo(
                         </Text>
                     </View>
 
+                    {/* DETAILS ROW (Below Flyer) */}
                     <View style={styles.detailsRow}>
+                        {/* Date & Location */}
                         <View style={styles.infoBlock}>
                             <View style={styles.infoItem}>
                                 <Ionicons
@@ -277,6 +288,7 @@ const EventCard = memo(
                                 </Text>
                             </View>
 
+                            {/* Top Pick Badge */}
                             {isRecommended && (
                                 <View
                                     style={{
@@ -301,6 +313,7 @@ const EventCard = memo(
                                 </View>
                             )}
 
+                            {/* Early Bird Badge */}
                             {isEarlyBird && !isRegistered && (
                                 <View
                                     style={{
@@ -333,6 +346,7 @@ const EventCard = memo(
                             )}
                         </View>
 
+                        {/* Price Badge */}
                         <View
                             style={[styles.priceBadge, { backgroundColor: theme.colors.secondary }]}
                         >
@@ -342,7 +356,7 @@ const EventCard = memo(
                         </View>
                     </View>
 
-                    {/* FOOTER ACTIONS ROW */}
+                    {/* FOOTER ACTION */}
                     {showRegisterButton &&
                         (isRegistered ? (
                             <View style={styles.registeredRow}>
@@ -393,13 +407,11 @@ const EventCard = memo(
                                 style={[
                                     styles.registerBtn,
                                     {
-                                        backgroundColor: isProcessing
-                                            ? theme.colors.border
-                                            : theme.colors.primary,
+                                        backgroundColor: isProcessing ? theme.colors.border : theme.colors.primary,
                                         ...theme.shadows.default,
                                     },
                                 ]}
-                                disabled={isProcessing} // 🛑 Gated freeze prevents quick multi-taps
+                                disabled={isProcessing}
                                 onPress={handleRegisterPress}
                             >
                                 {isProcessing ? (
