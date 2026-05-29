@@ -1,16 +1,8 @@
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
-import {
-    collection,
-    limit,
-    onSnapshot,
-    query,
-    where,
-    getDocs,
-    startAfter,
-    orderBy,
-} from 'firebase/firestore';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { collection, limit, onSnapshot, query, where, getDocs } from 'firebase/firestore';
+import { useEffect, useRef, useState } from 'react';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import {
     Animated,
     Alert,
@@ -31,17 +23,6 @@ import { useAuth } from '../lib/AuthContext';
 import { submitFeedback } from '../lib/feedbackService';
 import { db } from '../lib/firebaseConfig';
 import { useTheme } from '../lib/ThemeContext';
-import { useNavigation } from '@react-navigation/native';
-
-let MapView = null;
-let Marker = null;
-let Callout = null;
-if (Platform.OS !== 'web') {
-    const Maps = require('react-native-maps');
-    MapView = Maps.default;
-    Marker = Maps.Marker;
-    Callout = Maps.Callout;
-}
 
 const FILTERS = ['Upcoming', 'Past', 'Cultural', 'Sports', 'Tech', 'Workshop', 'Seminar'];
 
@@ -51,43 +32,81 @@ export default function UserFeed() {
     const [events, setEvents] = useState([]);
     const [participatingIds, setParticipatingIds] = useState([]); // Track joined events
     const [activeFilter, setActiveFilter] = useState('Upcoming');
+    const [searchHistory, setSearchHistory] = useState([]);
+    const [showHistory, setShowHistory] = useState(false);
     const [searchQuery, setSearchQuery] = useState('');
+    const [debouncedQuery, setDebouncedQuery] = useState(''); // filtering — 300ms debounced
+    const debounceTimer = useRef(null);
     const [loading, setLoading] = useState(true);
     const [refreshing, setRefreshing] = useState(false);
-    const [viewMode, setViewMode] = useState('list');
-    const navigation = useNavigation();
-
-    // Pagination and Recommendation State
-    const [debouncedSearchQuery, setDebouncedSearchQuery] = useState('');
-    const [upcomingPool, setUpcomingPool] = useState([]);
-    const [lastVisible, setLastVisible] = useState(null);
-    const [isFetchingMore, setIsFetchingMore] = useState(false);
-    const [hasMore, setHasMore] = useState(true);
-    const PAGE_SIZE = 20;
-
-    // Feedback Modal State
     const [showFeedbackModal, setShowFeedbackModal] = useState(false);
     const [currentFeedbackRequest, setCurrentFeedbackRequest] = useState(null);
-
     const scrollY = useRef(new Animated.Value(0)).current;
+    //  debounce effect
+    // Debounce effect — 300ms delay before dispatching query to filter (#304)
+    useEffect(() => {
+        if (debounceTimer.current) clearTimeout(debounceTimer.current);
+        debounceTimer.current = setTimeout(() => {
+            setDebouncedQuery(searchQuery);
+        }, 300);
+        return () => clearTimeout(debounceTimer.current);
+    }, [searchQuery]);
 
-    // Listen for my registrations
+    // Load persisted search history on component mount
+    useEffect(() => {
+        const loadHistory = async () => {
+            try {
+                const stored = await AsyncStorage.getItem('searchHistory');
+                if (stored) {
+                    setSearchHistory(JSON.parse(stored));
+                }
+            } catch (e) {
+                console.error('Failed to load search history', e);
+            }
+        };
+        loadHistory();
+    }, []);
+
+    const updateHistory = query => {
+        if (!query) return;
+        // Update in-memory only; no AsyncStorage side‑effect
+        setSearchHistory(prev => {
+            const filtered = prev.filter(q => q !== query);
+            return [query, ...filtered].slice(0, 5);
+        });
+    };
+
+    // Persist search history to AsyncStorage (called on submit/blur)
+    const persistSearchHistory = async raw => {
+        const normalized = raw?.trim();
+        if (!normalized) return;
+        setSearchHistory(prev => {
+            const filtered = prev.filter(q => q !== normalized);
+            const newHist = [normalized, ...filtered].slice(0, 5);
+            AsyncStorage.setItem('searchHistory', JSON.stringify(newHist)).catch(e =>
+                console.error('Failed to save search history', e),
+            );
+            return newHist;
+        });
+    };
+
+    // Clear history handler
+    const clearHistory = async () => {
+        try {
+            await AsyncStorage.removeItem('searchHistory');
+        } catch (e) {
+            console.error('Failed to clear search history', e);
+        }
+        setSearchHistory([]);
+    };
     useEffect(() => {
         if (!user) return;
-        const q = collection(db, 'users', user.uid, 'participating');
-        const unsub = onSnapshot(q, snap => {
+        const participatingQuery = collection(db, 'users', user.uid, 'participating');
+        const unsub = onSnapshot(participatingQuery, snap => {
             setParticipatingIds(snap.docs.map(d => d.id));
         });
         return unsub;
     }, [user]);
-
-    // Debounce search query to prevent excessive Firestore reads
-    useEffect(() => {
-        const timer = setTimeout(() => {
-            setDebouncedSearchQuery(searchQuery);
-        }, 500);
-        return () => clearTimeout(timer);
-    }, [searchQuery]);
 
     // Listen for pending feedback requests
     useEffect(() => {
@@ -118,145 +137,44 @@ export default function UserFeed() {
         return () => unsubscribe();
     }, [user]);
 
-    // Fetch a pool of upcoming events for recommendations
     useEffect(() => {
-        if (!user) return;
-        const fetchPool = async () => {
-            try {
-                const now = new Date().toISOString();
-                const q = query(
-                    collection(db, 'events'),
-                    where('status', '==', 'active'),
-                    where('startAt', '>=', now),
-                    orderBy('startAt', 'asc'),
-                    limit(50),
-                );
-                const snapshot = await getDocs(q);
-                const list = [];
-                snapshot.forEach(doc => {
-                    const data = doc.data();
-                    list.push({ id: doc.id, ...data });
-                });
-                setUpcomingPool(list);
-            } catch (error) {
-                console.error('Error fetching recommendation pool: ', error);
-            }
-        };
-        fetchPool();
-    }, [user]);
-
-    const checkAudienceEligibility = event => {
-        if (role === 'student' && userData && userData.branch && userData.year) {
-            const targetDepts = event.target?.departments || [];
-            const userDept = userData.branch || 'Unknown';
-            const deptMatch =
-                targetDepts.length === 0 ||
-                targetDepts.includes('All') ||
-                targetDepts.includes(userDept);
-
-            const targetYears = event.target?.years || [];
-            const userYear = parseInt(userData.year || 0);
-            const yearMatch = targetYears.length === 0 || targetYears.includes(userYear);
-
-            return deptMatch && yearMatch;
+        if (!user) {
+            setLoading(false);
+            return;
         }
-        return true;
-    };
 
-    const fetchEvents = useCallback(
-        async (loadMore = false) => {
-            if (!user) return;
-            if (loadMore && (!hasMore || isFetchingMore)) return;
+        // Fetching events. ideally separate query.
+        const eventsQuery = query(collection(db, 'events'));
 
-            if (loadMore) {
-                setIsFetchingMore(true);
-            } else {
-                setLoading(true);
-                setEvents([]);
-                setLastVisible(null);
-            }
-
-            try {
-                const now = new Date().toISOString();
-                const qConstraints = [where('status', '==', 'active')];
-
-                if (activeFilter === 'Upcoming') {
-                    qConstraints.push(where('startAt', '>=', now), orderBy('startAt', 'asc'));
-                } else if (activeFilter === 'Past') {
-                    qConstraints.push(where('startAt', '<', now), orderBy('startAt', 'desc'));
-                } else {
-                    // For categories, without composite index, we might just query upcoming
-                    // and filter locally, OR assume composite index exists.
-                    // Assuming composite index exists for category + startAt
-                    qConstraints.push(
-                        where('category', '==', activeFilter),
-                        where('startAt', '>=', now),
-                        orderBy('startAt', 'asc'),
-                    );
-                }
-
-                if (loadMore && lastVisible) {
-                    qConstraints.push(startAfter(lastVisible));
-                }
-                const q = query(collection(db, 'events'), ...qConstraints, limit(PAGE_SIZE));
-
-                const snapshot = await getDocs(q);
+        const unsubscribe = onSnapshot(
+            eventsQuery,
+            snapshot => {
                 const list = [];
                 snapshot.forEach(doc => {
                     const data = doc.data();
+                    if (data.status === 'suspended') return;
                     list.push({ id: doc.id, ...data });
                 });
-
-                if (loadMore) {
-                    setEvents(prev => {
-                        // Prevent duplicates
-                        const existingIds = new Set(prev.map(e => e.id));
-                        const newEvents = list.filter(e => !existingIds.has(e.id));
-                        return [...prev, ...newEvents];
-                    });
-                } else {
-                    setEvents(list);
-                }
-
-                if (snapshot.docs.length > 0) {
-                    setLastVisible(snapshot.docs[snapshot.docs.length - 1]);
-                } else {
-                    if (!loadMore) setLastVisible(null);
-                }
-                setHasMore(snapshot.docs.length === PAGE_SIZE);
-            } catch (error) {
-                console.error('Error fetching paginated events: ', error);
-                // Fallback if composite index is missing for categories
-                if (error.message?.includes('index')) {
-                    Alert.alert(
-                        'Database Index Required',
-                        'Please create the required Firestore composite index found in the console logs.',
-                    );
-                }
-            } finally {
+                setEvents(list);
                 setLoading(false);
-                setIsFetchingMore(false);
                 setRefreshing(false);
-            }
-        },
-        [user, activeFilter, debouncedSearchQuery, hasMore, isFetchingMore, lastVisible],
-    );
+            },
+            [user, activeFilter],
+        );
 
-    useEffect(() => {
-        fetchEvents(false);
-    }, [fetchEvents]);
+        return () => unsubscribe();
+    }, [role, user]);
 
     // Recommendation Logic: Views + User History + Freshness
     const getRecommendedEvents = () => {
         const now = new Date();
-        const eligiblePool = upcomingPool.filter(checkAudienceEligibility);
-        const upcomingEvents = eligiblePool.filter(e => new Date(e.startAt) >= now);
+        const upcomingEvents = events.filter(e => new Date(e.startAt) >= now);
 
         if (upcomingEvents.length === 0) return [];
 
         // 1. Analyze User History (Favorite Categories)
         const categoryCounts = {};
-        upcomingPool
+        events
             .filter(e => participatingIds.includes(e.id))
             .forEach(e => {
                 if (e.category) {
@@ -300,11 +218,12 @@ export default function UserFeed() {
     };
 
     const getFilteredEvents = () => {
+        const now = new Date();
         let filtered = events;
 
         // 0. Search Query Filtering
-        if (debouncedSearchQuery.trim()) {
-            const query = debouncedSearchQuery.toLowerCase();
+        if (debouncedQuery.trim()) {
+            const query = debouncedQuery.toLowerCase();
             filtered = filtered.filter(
                 e =>
                     e.title?.toLowerCase().includes(query) ||
@@ -314,10 +233,61 @@ export default function UserFeed() {
         }
 
         // 1. Strict Profile Filtering (Department & Year)
-        filtered = filtered.filter(checkAudienceEligibility);
+        if (role === 'student' && userData && userData.branch && userData.year) {
+            // Only filter if we have complete user data
+            filtered = filtered.filter(e => {
+                // Check Department
+                const targetDepts = e.target?.departments || [];
+                const userDept = userData.branch || 'Unknown';
+                // If no specific departments listed, assume Open to All
+                const deptMatch =
+                    targetDepts.length === 0 ||
+                    targetDepts.includes('All') ||
+                    targetDepts.includes(userDept);
 
-        // We no longer need to filter by Upcoming/Past/Category manually
-        // because the backend query (fetchEvents) already handles it!
+                // Check Year
+                const targetYears = e.target?.years || [];
+                const userYear = parseInt(userData.year || 0);
+                // If targetYears is empty/undefined, assume open to all.
+                const yearMatch = targetYears.length === 0 || targetYears.includes(userYear);
+
+                return deptMatch && yearMatch;
+            });
+        }
+
+        // 2. Tab/Category Filtering
+
+        if (activeFilter === 'Upcoming') {
+            // Show events that ends in the future (includes ongoing)
+            filtered = filtered.filter(e => {
+                const end = e.endAt
+                    ? new Date(e.endAt)
+                    : new Date(new Date(e.startAt).getTime() + 24 * 60 * 60 * 1000); // Fallback to 24h if no endAt
+                return end >= now;
+            });
+            // Sort: Closest upcoming first
+            filtered.sort((a, b) => new Date(a.startAt) - new Date(b.startAt));
+        } else if (activeFilter === 'Past') {
+            // Show events that have ended
+            filtered = filtered.filter(e => {
+                const end = e.endAt
+                    ? new Date(e.endAt)
+                    : new Date(new Date(e.startAt).getTime() + 24 * 60 * 60 * 1000);
+                return end < now;
+            });
+            // Sort: Most recent past first
+            filtered.sort((a, b) => new Date(b.startAt) - new Date(a.startAt));
+        } else {
+            // Category filters - HIDE ENDED EVENTS
+            filtered = filtered.filter(e => {
+                const end = e.endAt
+                    ? new Date(e.endAt)
+                    : new Date(new Date(e.startAt).getTime() + 24 * 60 * 60 * 1000);
+                return e.category === activeFilter && end >= now;
+            });
+            // Sort: Closest upcoming first for categories too
+            filtered.sort((a, b) => new Date(a.startAt) - new Date(b.startAt));
+        }
 
         return filtered;
     };
@@ -327,7 +297,22 @@ export default function UserFeed() {
     const onRefresh = async () => {
         if (!user) return;
         setRefreshing(true);
-        await fetchEvents(false);
+        try {
+            const refreshEventsQuery = query(collection(db, 'events'));
+            const snapshot = await getDocs(refreshEventsQuery);
+            const list = [];
+            snapshot.forEach(doc => {
+                const data = doc.data();
+                if (data.status === 'suspended') return;
+                list.push({ id: doc.id, ...data });
+            });
+            setEvents(list);
+        } catch (error) {
+            console.error('Refresh error:', error);
+            Alert.alert('Error', 'Failed to refresh events.');
+        } finally {
+            setRefreshing(false);
+        }
     };
 
     const StickyHeader = () => (
@@ -345,10 +330,23 @@ export default function UserFeed() {
                     placeholder="Search events..."
                     placeholderTextColor={theme.colors.textSecondary}
                     value={searchQuery}
-                    onChangeText={setSearchQuery}
-                    accessible={true}
-                    accessibilityRole="search"
-                    accessibilityLabel="Search events"
+                    onChangeText={text => {
+                        setSearchQuery(text);
+                        updateHistory(text);
+                        // Hide history as soon as the user types something
+                        if (text.trim() !== '') setShowHistory(false);
+                    }}
+                    onFocus={() => {
+                        // Only show history if the input is empty
+                        if (searchQuery.trim() === '') setShowHistory(true);
+                    }}
+                    onBlur={() => {
+                        setShowHistory(false);
+                        persistSearchHistory(searchQuery);
+                    }}
+                    onSubmitEditing={() => {
+                        persistSearchHistory(searchQuery);
+                    }}
                 />
                 {searchQuery.length > 0 && (
                     <TouchableOpacity onPress={() => setSearchQuery('')}>
@@ -360,6 +358,43 @@ export default function UserFeed() {
                     </TouchableOpacity>
                 )}
             </View>
+            {/* Recent Search History */}
+            {showHistory && searchHistory.length > 0 && (
+                <View style={styles.historyContainer}>
+                    <ScrollView
+                        horizontal
+                        showsHorizontalScrollIndicator={false}
+                        style={styles.historyScroll}
+                    >
+                        {searchHistory.map(qh => (
+                            <TouchableOpacity
+                                key={qh}
+                                style={styles.historyChip}
+                                onPress={() => {
+                                    setSearchQuery(qh);
+                                    setShowHistory(false);
+                                }}
+                            >
+                                <Text style={styles.historyChipText}>{qh}</Text>
+                            </TouchableOpacity>
+                        ))}
+                    </ScrollView>
+                    <TouchableOpacity
+                        onPress={clearHistory}
+                        style={styles.clearHistoryBtn}
+                        accessible={true}
+                        accessibilityRole="button"
+                        accessibilityLabel="Clear search history"
+                        accessibilityHint="Deletes all saved search history"
+                    >
+                        <Ionicons
+                            name="trash-outline"
+                            size={18}
+                            color={theme.colors.textSecondary}
+                        />
+                    </TouchableOpacity>
+                </View>
+            )}
 
             <View style={styles.filterWrapper}>
                 <ScrollView
@@ -378,9 +413,6 @@ export default function UserFeed() {
                                     borderRadius: 25,
                                     ...theme.shadows.small,
                                 }}
-                                accessible={true}
-                                accessibilityRole="button"
-                                accessibilityLabel={`${f} filter`}
                             >
                                 {isActive ? (
                                     <LinearGradient
@@ -449,66 +481,9 @@ export default function UserFeed() {
 
     const renderHeader = () => (
         <Animated.View style={{ transform: [{ translateY: headerTranslateY }] }}>
-            <View
-                style={{
-                    flexDirection: 'row',
-                    justifyContent: 'space-between',
-                    alignItems: 'center',
-                    marginHorizontal: 20,
-                    marginBottom: 15,
-                }}
-            >
-                <Text style={styles.sectionTitle}>RECOMMENDED FOR YOU</Text>
-                {MapView && (
-                    <View
-                        style={{
-                            flexDirection: 'row',
-                            backgroundColor: theme.colors.surface,
-                            borderRadius: 20,
-                            overflow: 'hidden',
-                        }}
-                    >
-                        <TouchableOpacity
-                            onPress={() => setViewMode('list')}
-                            style={{
-                                paddingHorizontal: 15,
-                                paddingVertical: 8,
-                                backgroundColor:
-                                    viewMode === 'list' ? theme.colors.primary : 'transparent',
-                            }}
-                            accessible={true}
-                            accessibilityRole="button"
-                            accessibilityLabel="List view"
-                        >
-                            <Ionicons
-                                name="list"
-                                size={20}
-                                color={viewMode === 'list' ? '#fff' : theme.colors.textSecondary}
-                            />
-                        </TouchableOpacity>
-                        <TouchableOpacity
-                            onPress={() => setViewMode('map')}
-                            style={{
-                                paddingHorizontal: 15,
-                                paddingVertical: 8,
-                                backgroundColor:
-                                    viewMode === 'map' ? theme.colors.primary : 'transparent',
-                            }}
-                            accessible={true}
-                            accessibilityRole="button"
-                            accessibilityLabel="Map view"
-                        >
-                            <Ionicons
-                                name="map"
-                                size={20}
-                                color={viewMode === 'map' ? '#fff' : theme.colors.textSecondary}
-                            />
-                        </TouchableOpacity>
-                    </View>
-                )}
-            </View>
             {/* Recommendations Rail */}
             <View style={{ marginBottom: 20 }}>
+                <Text style={styles.sectionTitle}>RECOMMENDED FOR YOU</Text>
                 <ScrollView
                     horizontal
                     showsHorizontalScrollIndicator={false}
@@ -541,7 +516,7 @@ export default function UserFeed() {
                 <View style={{ paddingTop: 20 }}>
                     <SkeletonLoader />
                 </View>
-            ) : viewMode === 'list' ? (
+            ) : (
                 <Animated.SectionList
                     sections={[{ data: displayList }]}
                     keyExtractor={item => item.id}
@@ -557,12 +532,6 @@ export default function UserFeed() {
                             tintColor={theme.colors.primary}
                         />
                     }
-                    onEndReached={() => {
-                        if (hasMore && !isFetchingMore) {
-                            fetchEvents(true);
-                        }
-                    }}
-                    onEndReachedThreshold={0.5}
                     onScroll={Animated.event([{ nativeEvent: { contentOffset: { y: scrollY } } }], {
                         useNativeDriver: true,
                     })}
@@ -582,170 +551,7 @@ export default function UserFeed() {
                             </Text>
                         </View>
                     }
-                    ListFooterComponent={
-                        isFetchingMore ? (
-                            <View style={{ padding: 20, alignItems: 'center' }}>
-                                <Text style={{ color: theme.colors.textSecondary }}>
-                                    Loading more...
-                                </Text>
-                            </View>
-                        ) : null
-                    }
                 />
-            ) : (
-                MapView && (
-                    <View style={{ flex: 1 }}>
-                        <View style={{ paddingTop: 10 }}>
-                            <StickyHeader />
-                        </View>
-                        <View
-                            style={{
-                                flexDirection: 'row',
-                                justifyContent: 'flex-end',
-                                paddingHorizontal: 20,
-                                marginBottom: 10,
-                            }}
-                        >
-                            <View
-                                style={{
-                                    flexDirection: 'row',
-                                    backgroundColor: theme.colors.surface,
-                                    borderRadius: 20,
-                                    overflow: 'hidden',
-                                }}
-                            >
-                                <TouchableOpacity
-                                    onPress={() => setViewMode('list')}
-                                    style={{
-                                        paddingHorizontal: 15,
-                                        paddingVertical: 8,
-                                        backgroundColor:
-                                            viewMode === 'list'
-                                                ? theme.colors.primary
-                                                : 'transparent',
-                                    }}
-                                    accessible={true}
-                                    accessibilityRole="button"
-                                    accessibilityLabel="List view"
-                                >
-                                    <Ionicons
-                                        name="list"
-                                        size={20}
-                                        color={
-                                            viewMode === 'list'
-                                                ? '#fff'
-                                                : theme.colors.textSecondary
-                                        }
-                                    />
-                                </TouchableOpacity>
-                                <TouchableOpacity
-                                    onPress={() => setViewMode('map')}
-                                    style={{
-                                        paddingHorizontal: 15,
-                                        paddingVertical: 8,
-                                        backgroundColor:
-                                            viewMode === 'map'
-                                                ? theme.colors.primary
-                                                : 'transparent',
-                                    }}
-                                    accessible={true}
-                                    accessibilityRole="button"
-                                    accessibilityLabel="Map view"
-                                >
-                                    <Ionicons
-                                        name="map"
-                                        size={20}
-                                        color={
-                                            viewMode === 'map' ? '#fff' : theme.colors.textSecondary
-                                        }
-                                    />
-                                </TouchableOpacity>
-                            </View>
-                        </View>
-
-                        <View
-                            style={{
-                                flex: 1,
-                                marginHorizontal: 20,
-                                marginBottom: 20,
-                                borderRadius: 16,
-                                overflow: 'hidden',
-                                borderWidth: 1,
-                                borderColor: theme.colors.border,
-                            }}
-                        >
-                            <MapView
-                                style={{ flex: 1 }}
-                                initialRegion={{
-                                    latitude: 28.7041,
-                                    longitude: 77.1025,
-                                    latitudeDelta: 0.01,
-                                    longitudeDelta: 0.01,
-                                }}
-                            >
-                                {displayList
-                                    .filter(
-                                        e =>
-                                            e.coordinates &&
-                                            typeof e.coordinates === 'object' &&
-                                            Number.isFinite(e.coordinates.latitude) &&
-                                            Number.isFinite(e.coordinates.longitude),
-                                    )
-                                    .map(event => (
-                                        <Marker key={event.id} coordinate={event.coordinates}>
-                                            <Callout
-                                                onPress={() =>
-                                                    navigation.navigate('EventDetail', {
-                                                        eventId: event.id,
-                                                        action: 'view',
-                                                    })
-                                                }
-                                            >
-                                                <View style={{ width: 200, padding: 5 }}>
-                                                    <Text
-                                                        style={{
-                                                            fontWeight: 'bold',
-                                                            fontSize: 16,
-                                                            marginBottom: 5,
-                                                        }}
-                                                    >
-                                                        {event.title}
-                                                    </Text>
-                                                    <Text
-                                                        style={{
-                                                            color: '#666',
-                                                            fontSize: 12,
-                                                            marginBottom: 10,
-                                                        }}
-                                                        numberOfLines={2}
-                                                    >
-                                                        {event.description}
-                                                    </Text>
-                                                    <TouchableOpacity
-                                                        style={{
-                                                            backgroundColor: theme.colors.primary,
-                                                            padding: 8,
-                                                            borderRadius: 8,
-                                                            alignItems: 'center',
-                                                        }}
-                                                    >
-                                                        <Text
-                                                            style={{
-                                                                color: '#fff',
-                                                                fontWeight: 'bold',
-                                                            }}
-                                                        >
-                                                            View Details
-                                                        </Text>
-                                                    </TouchableOpacity>
-                                                </View>
-                                            </Callout>
-                                        </Marker>
-                                    ))}
-                            </MapView>
-                        </View>
-                    </View>
-                )
             )}
 
             {/* Feedback Modal */}
@@ -796,8 +602,28 @@ const styles = StyleSheet.create({
             web: { outlineStyle: 'none' },
         }),
     },
-    filterWrapper: {
-        height: 60,
+    historyContainer: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        marginHorizontal: 20,
+        marginBottom: 10,
+    },
+    historyScroll: {
+        flexGrow: 0,
+    },
+    historyChip: {
+        backgroundColor: '#eee',
+        paddingHorizontal: 12,
+        paddingVertical: 6,
+        borderRadius: 15,
+        marginRight: 8,
+    },
+    historyChipText: {
+        fontSize: 13,
+        color: '#333',
+    },
+    clearHistoryBtn: {
+        marginLeft: 8,
     },
     filterContent: {
         paddingHorizontal: 20,
