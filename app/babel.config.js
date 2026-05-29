@@ -6,7 +6,9 @@ module.exports = function (api) {
         require.resolve('react-native-reanimated/plugin');
         plugins.push('react-native-reanimated/plugin');
     } catch (_error) {
-        // Allow tests to run in environments where the optional plugin is not installed.
+        if (_error?.code !== 'MODULE_NOT_FOUND') {
+            throw _error;
+        }
     }
 
     return {
