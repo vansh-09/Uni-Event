@@ -124,6 +124,7 @@ function TabNavigator() {
             tabBar={props => <CustomTabBar {...props} />}
             screenOptions={{
                 headerShown: false,
+                unmountOnBlur: true,
                 tabBarStyle: {
                     position: 'absolute',
                     backgroundColor: 'transparent',
