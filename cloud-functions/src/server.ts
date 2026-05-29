@@ -32,12 +32,13 @@ if (admin.apps.length === 0) {
 }
 
 const app = express();
+app.disable('x-powered-by');
 app.use(cors({ origin: true }));
 app.use(express.json());
 
 // Auth Middleware to mimic Firebase Callable Context
 const validateFirebaseIdToken = async (req: express.Request, res: express.Response, next: express.NextFunction) => {
-  if ((!req.headers.authorization || !req.headers.authorization.startsWith('Bearer '))) {
+  if (!req.headers.authorization?.startsWith('Bearer ')) {
     res.status(403).send('Unauthorized');
     return;
   }

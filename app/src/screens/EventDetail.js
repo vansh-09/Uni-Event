@@ -1006,8 +1006,7 @@ export default function EventDetail({ route, navigation }) {
         }
         const isExpired = deadline && new Date() > deadline;
         const isEarlyBirdTicket =
-            ticket.isEarlyBird || (ticket.name && ticket.name.toLowerCase().includes('early'));
-        const isFree = !ticket.price || Number(ticket.price) <= 0;
+            ticket.isEarlyBird || ticket.name?.toLowerCase().includes('early');
         const accentColor = isEarlyBirdTicket ? '#EAB308' : theme.colors.primary;
         const benefitsOpen = expandedBenefits.has(idx);
         const hasBenefits = ticket.benefits && ticket.benefits.length > 0;
@@ -1277,10 +1276,12 @@ export default function EventDetail({ route, navigation }) {
                                 {isEarlyBirdTicket ? 'Early Bird Price' : 'Price'}
                             </Text>
                             <Text style={{ fontSize: 28, fontWeight: '800', color: accentColor }}>
-                                {isFree ? 'Free' : '\u20B9' + ticket.price}
+                                {!ticket.price || ticket.price === 0
+                                    ? 'Free'
+                                    : '\u20B9' + ticket.price}
                             </Text>
                         </View>
-                        {!isExpired && !isFree && (
+                        {!isExpired && ticket.price && ticket.price !== 0 && (
                             <View
                                 style={{
                                     backgroundColor: accentColor + '15',
@@ -1298,7 +1299,7 @@ export default function EventDetail({ route, navigation }) {
                                 </Text>
                             </View>
                         )}
-                        {!isExpired && isFree && (
+                        {!isExpired && (!ticket.price || ticket.price === 0) && (
                             <View
                                 style={{
                                     backgroundColor: '#22C55E15',
@@ -1319,6 +1320,35 @@ export default function EventDetail({ route, navigation }) {
             </View>
         );
     };
+
+    let certificateButtonText = 'Send Certificates';
+    if (sendingCertificates) {
+        certificateButtonText = 'Sending...';
+    } else if (event?.certificatesSent) {
+        certificateButtonText = 'Certificates Sent';
+    }
+
+    const eventEnded = new Date(event.endAt) < new Date();
+    let primaryBtnOnPress = toggleRsvp;
+    if (eventEnded) {
+        primaryBtnOnPress =
+            rsvpStatus === 'going' && event.certificatesSent ? handleDownloadCertificate : null;
+    }
+
+    let primaryBtnText;
+    if (eventEnded) {
+        if (rsvpStatus === 'going') {
+            primaryBtnText = event.certificatesSent ? 'Download Certificate' : 'Event Ended';
+        } else {
+            primaryBtnText = 'Closed';
+        }
+    } else if (rsvpStatus === 'going') {
+        primaryBtnText = 'Registered \u2713';
+    } else if (event.isPaid) {
+        primaryBtnText = `Book Ticket (\u20B9${event.price})`;
+    } else {
+        primaryBtnText = 'RSVP Now';
+    }
 
     return (
         <View style={{ flex: 1, backgroundColor: theme.colors.background }}>
@@ -2216,11 +2246,7 @@ export default function EventDetail({ route, navigation }) {
                                                 },
                                             ]}
                                         >
-                                            {sendingCertificates
-                                                ? 'Sending...'
-                                                : event.certificatesSent
-                                                  ? 'Certificates Sent'
-                                                  : 'Send Certificates'}
+                                            {certificateButtonText}
                                         </Text>
                                     </TouchableOpacity>
                                 )}
@@ -2311,13 +2337,7 @@ export default function EventDetail({ route, navigation }) {
                                     borderColor: theme.colors.textSecondary,
                                 },
                         ]}
-                        onPress={
-                            new Date(event.endAt) < new Date()
-                                ? rsvpStatus === 'going' && event.certificatesSent
-                                    ? handleDownloadCertificate
-                                    : null
-                                : toggleRsvp
-                        }
+                        onPress={primaryBtnOnPress}
                         disabled={
                             new Date(event.endAt) < new Date() &&
                             !(rsvpStatus === 'going' && event.certificatesSent)
@@ -2333,17 +2353,7 @@ export default function EventDetail({ route, navigation }) {
                                     },
                             ]}
                         >
-                            {new Date(event.endAt) < new Date()
-                                ? rsvpStatus === 'going'
-                                    ? event.certificatesSent
-                                        ? 'Download Certificate'
-                                        : 'Event Ended'
-                                    : 'Closed'
-                                : rsvpStatus === 'going'
-                                  ? 'Registered ✓'
-                                  : event.isPaid
-                                    ? `Book Ticket (₹${event.price})`
-                                    : 'RSVP Now'}
+                            {primaryBtnText}
                         </Text>
                     </TouchableOpacity>
                 </View>

@@ -1,6 +1,6 @@
 import { Ionicons } from '@expo/vector-icons';
 import { collection, limit, onSnapshot, orderBy, query, updateDoc, doc } from 'firebase/firestore';
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { ActivityIndicator, FlatList, StyleSheet, Text, View, Switch, Alert } from 'react-native';
 import ScreenWrapper from '../components/ScreenWrapper';
 import { useAuth } from '../lib/AuthContext';
@@ -9,6 +9,36 @@ import { useTheme } from '../lib/ThemeContext';
 import PropTypes from 'prop-types';
 import { getUserLevel } from '../lib/userLevels';
 import { getSafeSelectedProfileBadge } from '../lib/profileBadges';
+
+const LeaderboardListHeader = ({ theme, togglePrivacy, isAnonymous }) => (
+    <View style={{ marginBottom: 20 }}>
+        <Text style={[styles.title, { color: theme.colors.text, marginBottom: 15 }]}>
+            Leaderboard
+        </Text>
+
+        {/* Privacy Toggle */}
+        <View style={[styles.toggleCard, { backgroundColor: theme.colors.surface }]}>
+            <View style={{ flex: 1 }}>
+                <Text style={[styles.toggleTitle, { color: theme.colors.text }]}>Go Anonymous</Text>
+                <Text style={[styles.toggleSubtitle, { color: theme.colors.textSecondary }]}>
+                    Hide your name from others on the leaderboard.
+                </Text>
+            </View>
+            <Switch
+                trackColor={{ false: theme.colors.border, true: theme.colors.primary }}
+                thumbColor={'#fff'}
+                onValueChange={togglePrivacy}
+                value={isAnonymous}
+            />
+        </View>
+    </View>
+);
+
+LeaderboardListHeader.propTypes = {
+    theme: PropTypes.object.isRequired,
+    togglePrivacy: PropTypes.func.isRequired,
+    isAnonymous: PropTypes.bool.isRequired,
+};
 
 export default function LeaderboardScreen({ navigation }) {
     const { theme } = useTheme();
@@ -41,16 +71,30 @@ export default function LeaderboardScreen({ navigation }) {
         return () => unsubscribe();
     }, []);
 
-    const togglePrivacy = async value => {
-        if (!user) return;
-        try {
-            const userRef = doc(db, 'users', user.uid);
-            await updateDoc(userRef, { isAnonymous: value });
-        } catch (_error) {
-            console.error('Privacy toggle error:', _error);
-            Alert.alert('Error', 'Failed to update privacy setting.');
-        }
-    };
+    const togglePrivacy = useCallback(
+        async value => {
+            if (!user) return;
+            try {
+                const userRef = doc(db, 'users', user.uid);
+                await updateDoc(userRef, { isAnonymous: value });
+            } catch (_error) {
+                console.error('Privacy toggle error:', _error);
+                Alert.alert('Error', 'Failed to update privacy setting.');
+            }
+        },
+        [user],
+    );
+
+    const renderHeader = useCallback(
+        () => (
+            <LeaderboardListHeader
+                theme={theme}
+                togglePrivacy={togglePrivacy}
+                isAnonymous={isAnonymous}
+            />
+        ),
+        [theme, togglePrivacy, isAnonymous],
+    );
 
     const renderItem = ({ item }) => {
         const isMe = item.id === user?.uid;
@@ -141,32 +185,6 @@ export default function LeaderboardScreen({ navigation }) {
         );
     };
 
-    const ListHeader = () => (
-        <View style={{ marginBottom: 20 }}>
-            <Text style={[styles.title, { color: theme.colors.text, marginBottom: 15 }]}>
-                Leaderboard
-            </Text>
-
-            {/* Privacy Toggle */}
-            <View style={[styles.toggleCard, { backgroundColor: theme.colors.surface }]}>
-                <View style={{ flex: 1 }}>
-                    <Text style={[styles.toggleTitle, { color: theme.colors.text }]}>
-                        Go Anonymous
-                    </Text>
-                    <Text style={[styles.toggleSubtitle, { color: theme.colors.textSecondary }]}>
-                        Hide your name from others on the leaderboard.
-                    </Text>
-                </View>
-                <Switch
-                    trackColor={{ false: theme.colors.border, true: theme.colors.primary }}
-                    thumbColor={'#fff'}
-                    onValueChange={togglePrivacy}
-                    value={isAnonymous}
-                />
-            </View>
-        </View>
-    );
-
     if (loading)
         return (
             <ScreenWrapper showLogo={true}>
@@ -185,7 +203,7 @@ export default function LeaderboardScreen({ navigation }) {
                     data={users}
                     keyExtractor={item => item.id}
                     renderItem={renderItem}
-                    ListHeaderComponent={ListHeader}
+                    ListHeaderComponent={renderHeader}
                     contentContainerStyle={{ paddingBottom: 100 }}
                     style={{ flex: 1 }}
                     showsVerticalScrollIndicator={false}
