@@ -29,7 +29,6 @@ import {
     Text,
     TouchableOpacity,
     View,
-    Share,
     Switch,
 } from 'react-native';
 import ConfettiCannon from 'react-native-confetti-cannon';
@@ -41,6 +40,7 @@ import { useAuth } from '../lib/AuthContext';
 import * as CalendarService from '../lib/CalendarService';
 import { submitFeedback } from '../lib/feedbackService';
 import { db } from '../lib/firebaseConfig';
+import participantService from '../lib/participantService';
 import {
     cancelScheduledNotification,
     scheduleEventReminder,
@@ -50,7 +50,10 @@ import { useTheme } from '../lib/ThemeContext';
 import { sendBulkCertificates } from '../lib/EmailService';
 import { getEarlyBirdInfo, getTimestampMs } from '../lib/earlyBird';
 import { buildCounterUpdates, buildPreviewUpdate } from '../lib/eventAnalyticsCounters';
+import { formatEventDate, formatEventTime } from '../lib/formatEventDate';
+import { predictAttendance } from '../lib/capacityPredictor';
 import PropTypes from 'prop-types';
+import logger from '../lib/logger';
 
 // Constants to eliminate SonarQube Magic Numbers
 const RSVP_POINTS_CHANGE = 10;
@@ -73,6 +76,7 @@ export default function EventDetail({ route, navigation }) {
     const [hasGivenFeedback, setHasGivenFeedback] = useState(false);
     const [showFeedbackModal, setShowFeedbackModal] = useState(false);
     const [showAppealModal, setShowAppealModal] = useState(false);
+    const [capacityPrediction, setCapacityPrediction] = useState(null);
 
     const [sendingAppeal, setSendingAppeal] = useState(false);
     const [activeTab, setActiveTab] = useState('about');
@@ -102,7 +106,7 @@ export default function EventDetail({ route, navigation }) {
             setShowAppealModal(false);
             Alert.alert('Submitted', 'Appeal sent to admin for review.');
         } catch (_e) {
-            console.error('Error submitting appeal:', _e);
+            logger.error('Error submitting appeal:', _e);
             Alert.alert('Error', 'Failed to submit appeal');
         } finally {
             setSendingAppeal(false);
@@ -125,12 +129,13 @@ export default function EventDetail({ route, navigation }) {
                 }
             }
         } catch (error) {
-            console.error('Error toggling buddy preference:', error);
+            logger.error('Error toggling buddy preference:', error);
             Alert.alert('Error', 'Failed to update buddy preference');
         }
     };
 
     const [hostName, setHostName] = useState('Organizer');
+    const [isVerifiedOrganizer, setIsVerifiedOrganizer] = useState(false);
     const [reminderId, setReminderId] = useState(null); // Firestore Doc ID if set
     const [isBookmarked, setIsBookmarked] = useState(false);
 
@@ -147,15 +152,31 @@ export default function EventDetail({ route, navigation }) {
 
     useEffect(() => {
         if (event?.ownerId) {
-            getDoc(doc(db, 'users', event.ownerId)).then(snap => {
-                if (snap.exists()) {
-                    setHostName(snap.data().displayName || event.organizerName || 'Organizer');
-                }
-            });
+            getDoc(doc(db, 'users', event.ownerId))
+                .then(snap => {
+                    if (snap.exists()) {
+                        const userData = snap.data();
+
+                        setHostName(userData.displayName || event.organizerName || 'Organizer');
+
+                        setIsVerifiedOrganizer(userData.verificationStatus === 'verified');
+                    } else {
+                        setHostName(event.organizerName || 'Organizer');
+                        setIsVerifiedOrganizer(false);
+                    }
+                })
+                .catch(() => {
+                    setHostName(event.organizerName || 'Organizer');
+                    setIsVerifiedOrganizer(false);
+                });
         } else if (event?.organizerName) {
             setHostName(event.organizerName);
+            setIsVerifiedOrganizer(false);
+        } else {
+            setHostName('Organizer');
+            setIsVerifiedOrganizer(false);
         }
-    }, [event]);
+    }, [event?.ownerId, event?.organizerName]);
 
     // Increment View Count (Unique per User)
     useEffect(() => {
@@ -180,7 +201,7 @@ export default function EventDetail({ route, navigation }) {
                     });
                 }
             } catch (error) {
-                console.log('Error recording view:', error);
+                logger.debug('Error recording view:', error);
             }
         };
 
@@ -205,19 +226,18 @@ export default function EventDetail({ route, navigation }) {
             setLoading(false);
         });
 
-        const unsubParticipants = onSnapshot(
-            collection(db, `events/${eventId}/participants`),
-            snapshot => {
-                setParticipantCount(snapshot.size);
-                const list = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-                setParticipants(list);
-                if (user) {
-                    const myDoc = list.find(d => d.id === user.uid);
-                    if (myDoc) setRsvpStatus('going');
-                    else setRsvpStatus(null);
-                }
-            },
-        );
+        const unsubParticipants = participantService.subscribeParticipants(db, eventId, data => {
+            const list = Array.isArray(data) ? data : [];
+            setParticipantCount(list.length);
+            setParticipants(list);
+            if (user) {
+                const myDoc = list.find(d => d.id === user.uid);
+                if (myDoc) setRsvpStatus('going');
+                else setRsvpStatus(null);
+            } else {
+                setRsvpStatus(null);
+            }
+        });
 
         if (user) {
             getDoc(doc(db, `events/${eventId}/feedback`, user.uid)).then(snap => {
@@ -252,6 +272,23 @@ export default function EventDetail({ route, navigation }) {
         };
     }, [eventId, user, navigation]);
 
+    useEffect(() => {
+        if (!event) return;
+        const cap = event.capacity;
+        if (!cap || cap <= 0) {
+            setCapacityPrediction(null);
+            return;
+        }
+        const rsvpCount = event.participantCount || 0;
+        predictAttendance({
+            category: event.category,
+            rsvpCount,
+            capacity: cap,
+        }).then(result => {
+            setCapacityPrediction(result);
+        });
+    }, [event]);
+
     // Derived State
     const isOwner = user && event?.ownerId === user.uid;
     const isSuspended = event?.status === 'suspended';
@@ -263,16 +300,16 @@ export default function EventDetail({ route, navigation }) {
         }
 
         try {
-            console.log('Toggling bookmark for event:', eventId, 'Current state:', isBookmarked);
+            logger.debug('Toggling bookmark for event:', eventId, 'Current state:', isBookmarked);
             const bookmarkRef = doc(db, 'users', user.uid, 'savedEvents', eventId);
 
             if (isBookmarked) {
-                console.log('Removing bookmark...');
+                logger.debug('Removing bookmark...');
                 await deleteDoc(bookmarkRef);
                 setIsBookmarked(false);
                 Alert.alert('Removed', 'Event removed from saved events.');
             } else {
-                console.log('Adding bookmark...');
+                logger.debug('Adding bookmark...');
                 await setDoc(bookmarkRef, {
                     eventId: eventId,
                     savedAt: new Date().toISOString(),
@@ -280,9 +317,9 @@ export default function EventDetail({ route, navigation }) {
                 setIsBookmarked(true);
                 Alert.alert('Saved', 'Event saved for later!');
             }
-            console.log('Bookmark toggled successfully. New state:', !isBookmarked);
+            logger.debug('Bookmark toggled successfully. New state:', !isBookmarked);
         } catch (e) {
-            console.error('Bookmark error:', e);
+            logger.error('Bookmark error:', e);
             Alert.alert('Error', `Failed to save event: ${e.message}`);
         }
     };
@@ -290,7 +327,7 @@ export default function EventDetail({ route, navigation }) {
     const shareEvent = async () => {
         try {
             const eventUrl = `https://unievent-ez2w.onrender.com/event/${eventId}`; // Replace with your actual domain
-            const shareMessage = `🎉 Check out this event: ${event.title}\n\n📅 ${new Date(event.startAt).toLocaleDateString()} at ${new Date(event.startAt).toLocaleTimeString()}\n📍 ${event.location || 'Online'}\n\n${eventUrl}`;
+            const shareMessage = `🎉 Check out this event: ${event.title}\n\n📅 ${formatEventDate(event.startAt)} at ${formatEventTime(event.startAt)}\n📍 ${event.location || 'Online'}\n\n${eventUrl}`;
 
             // For web, use Web Share API if available
             if (Platform.OS === 'web' && navigator.share) {
@@ -335,7 +372,7 @@ export default function EventDetail({ route, navigation }) {
                 });
             }
         } catch (error) {
-            console.error('Error sharing:', error);
+            logger.error('Error sharing:', error);
         }
     };
 
@@ -371,7 +408,7 @@ export default function EventDetail({ route, navigation }) {
                 }
             }
         } catch (e) {
-            console.error(e);
+            logger.error(e);
             Alert.alert('Error', 'Action failed.');
         }
     };
@@ -511,7 +548,7 @@ export default function EventDetail({ route, navigation }) {
                 );
             }
         } catch (e) {
-            console.error('RSVP Error: ', e);
+            logger.error('RSVP Error: ', e);
             Alert.alert('Error', 'Failed to update RSVP');
         }
     };
@@ -539,24 +576,17 @@ export default function EventDetail({ route, navigation }) {
 
         setSendingCertificates(true);
         try {
-            // Fetch Participants
-            console.log(`Fetching participants for event: ${event.id}`);
-            const participantsRef = collection(db, `events/${event.id}/participants`);
-            const snapshot = await getDocs(participantsRef);
-            console.log(`Snapshot size: ${snapshot.size}`);
-
-            const participants = snapshot.docs
-                .map(doc => {
-                    const data = doc.data();
-                    console.log(`Participant: ${data.name}, Email: ${data.email}`);
-                    return {
-                        name: data.name,
-                        email: data.email,
-                    };
-                })
+            // Fetch Participants via participantService
+            logger.debug(`Fetching participants for event: ${event.id}`);
+            const snapshotData = await (
+                await import('../lib/participantService')
+            ).default.fetchParticipantsOnce(db, event.id);
+            const participants = (snapshotData || [])
+                .map(d => ({ name: d.name, email: d.email }))
                 .filter(p => p.email && p.email !== '-');
+            logger.debug(`Valid participants count: ${participants.length}`);
 
-            console.log(`Valid participants count: ${participants.length}`);
+            logger.debug(`Valid participants count: ${participants.length}`);
 
             if (participants.length === 0) {
                 Alert.alert('Error', 'No participants found with valid emails.');
@@ -565,15 +595,15 @@ export default function EventDetail({ route, navigation }) {
             }
 
             // Send certificates via EmailJS (Frontend)
-            console.log('Calling sendBulkCertificates...');
+            logger.debug('Calling sendBulkCertificates...');
             const eventLink = `https://unievent-ez2w.onrender.com/event/${event.id}`;
             const count = await sendBulkCertificates(
                 participants,
                 event.title,
-                new Date(event.startAt).toLocaleDateString(),
+                formatEventDate(event.startAt),
                 eventLink,
             );
-            console.log(`Sent count: ${count}`);
+            logger.debug(`Sent count: ${count}`);
 
             // Update event status
             await updateDoc(doc(db, 'events', event.id), {
@@ -583,7 +613,7 @@ export default function EventDetail({ route, navigation }) {
 
             Alert.alert('Success', `Certificates sent to ${count} participants.`);
         } catch (e) {
-            console.error('Certificate Send Error:', e);
+            logger.error('Certificate Send Error:', e);
             Alert.alert('Error', 'Failed to send certificates via EmailJS');
         } finally {
             setSendingCertificates(false);
@@ -815,7 +845,7 @@ export default function EventDetail({ route, navigation }) {
                                 </div>
                                 
                                 <div class="sign-box">
-                                    <div class="sign-name">${new Date(event.startAt).toLocaleDateString()}</div>
+                                    <div class="sign-name">${formatEventDate(event.startAt)}</div>
                                     <div class="sign-label">Date Issued</div>
                                 </div>
                             </div>
@@ -862,7 +892,7 @@ export default function EventDetail({ route, navigation }) {
                 }
             }
         } catch (e) {
-            console.error('Certificate Error:', e);
+            logger.error('Certificate Error:', e);
             Alert.alert('Error', 'Failed to generate certificate: ' + e.message);
         } finally {
             setSendingCertificates(false); // Reset loading state
@@ -886,13 +916,13 @@ export default function EventDetail({ route, navigation }) {
 
             await Linking.openURL(finalUrl);
         } catch (error) {
-            console.log(error);
+            logger.debug(error);
             Alert.alert('Error', 'Failed to open LinkedIn');
         }
     };
 
     const handleSendCertificates = async () => {
-        console.log('Send Certificates Button Clicked');
+        logger.debug('Send Certificates Button Clicked');
         sendCertificates();
     };
 
@@ -911,7 +941,7 @@ export default function EventDetail({ route, navigation }) {
             setHasGivenFeedback(true);
             Alert.alert('Thank You', 'Feedback submitted!');
         } catch (error) {
-            console.error(error);
+            logger.error(error);
             Alert.alert('Error', 'Failed to submit feedback');
         }
     };
@@ -976,7 +1006,7 @@ export default function EventDetail({ route, navigation }) {
         const isExpired = deadline && new Date() > deadline;
         const isEarlyBirdTicket =
             ticket.isEarlyBird || (ticket.name && ticket.name.toLowerCase().includes('early'));
-        const isFree = !ticket.price || ticket.price === 0;
+        const isFree = !ticket.price || Number(ticket.price) <= 0;
         const accentColor = isEarlyBirdTicket ? '#EAB308' : theme.colors.primary;
         const benefitsOpen = expandedBenefits.has(idx);
         const hasBenefits = ticket.benefits && ticket.benefits.length > 0;
@@ -1428,14 +1458,13 @@ export default function EventDetail({ route, navigation }) {
                                 <View style={[styles.priceBadge, { backgroundColor: '#F59E0B' }]}>
                                     <Ionicons name="cash" size={14} color="#fff" />
                                     <Text style={styles.priceText}>
-                                        ₹{getEarlyBirdInfo(event).currentPrice}
-                                        {getEarlyBirdInfo(event).isEligible &&
-                                            getEarlyBirdInfo(event).isExplicit && (
-                                                <Text style={{ fontSize: 10, opacity: 0.8 }}>
-                                                    {' '}
-                                                    (Early Bird)
-                                                </Text>
-                                            )}
+                                        ₹{ebInfo?.currentPrice ?? event.price}
+                                        {ebInfo?.isEligible && ebInfo?.isExplicit && (
+                                            <Text style={{ fontSize: 10, opacity: 0.8 }}>
+                                                {' '}
+                                                (Early Bird)
+                                            </Text>
+                                        )}
                                     </Text>
                                 </View>
                             ) : (
@@ -1445,7 +1474,7 @@ export default function EventDetail({ route, navigation }) {
                                 </View>
                             )}
                             {/* Early Bird indicator */}
-                            {getEarlyBirdInfo(event).isEligible && rsvpStatus !== 'going' && (
+                            {ebInfo?.isEligible && rsvpStatus !== 'going' && (
                                 <View style={[styles.priceBadge, { backgroundColor: '#EAB308' }]}>
                                     <Text style={styles.priceText}>🐦 Early Bird</Text>
                                 </View>
@@ -1486,9 +1515,20 @@ export default function EventDetail({ route, navigation }) {
                                 >
                                     Hosted by
                                 </Text>
-                                <Text style={[styles.hostName, { color: theme.colors.text }]}>
-                                    {hostName}
-                                </Text>
+                                <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                                    <Text style={[styles.hostName, { color: theme.colors.text }]}>
+                                        {hostName}
+                                    </Text>
+
+                                    {isVerifiedOrganizer && (
+                                        <Ionicons
+                                            name="checkmark-circle"
+                                            size={18}
+                                            color="#3B82F6"
+                                            style={{ marginLeft: 6 }}
+                                        />
+                                    )}
+                                </View>
                             </View>
                             <Ionicons
                                 name="chevron-forward"
@@ -1813,12 +1853,7 @@ export default function EventDetail({ route, navigation }) {
                                     Date & Time
                                 </Text>
                                 <Text style={[styles.detailValue, { color: theme.colors.text }]}>
-                                    {new Date(event.startAt).toLocaleDateString('en-US', {
-                                        weekday: 'short',
-                                        month: 'short',
-                                        day: 'numeric',
-                                        year: 'numeric',
-                                    })}
+                                    {formatEventDate(event.startAt)}
                                 </Text>
                                 <Text
                                     style={[
@@ -1826,10 +1861,7 @@ export default function EventDetail({ route, navigation }) {
                                         { color: theme.colors.textSecondary },
                                     ]}
                                 >
-                                    {new Date(event.startAt).toLocaleTimeString([], {
-                                        hour: '2-digit',
-                                        minute: '2-digit',
-                                    })}
+                                    {formatEventTime(event.startAt)}
                                 </Text>
                             </View>
                         </View>
@@ -1861,6 +1893,73 @@ export default function EventDetail({ route, navigation }) {
                                 </Text>
                             </View>
                         </View>
+
+                        {event.capacity && (
+                            <>
+                                <View
+                                    style={[
+                                        styles.detailDivider,
+                                        { backgroundColor: theme.colors.border },
+                                    ]}
+                                />
+                                <View style={styles.detailRow}>
+                                    <View
+                                        style={[
+                                            styles.detailIconContainer,
+                                            { backgroundColor: theme.colors.primary + '15' },
+                                        ]}
+                                    >
+                                        <Ionicons
+                                            name="people-outline"
+                                            size={22}
+                                            color={theme.colors.primary}
+                                        />
+                                    </View>
+                                    <View style={styles.detailContent}>
+                                        <Text
+                                            style={[
+                                                styles.detailLabel,
+                                                { color: theme.colors.textSecondary },
+                                            ]}
+                                        >
+                                            Capacity
+                                        </Text>
+                                        <Text
+                                            style={[
+                                                styles.detailValue,
+                                                { color: theme.colors.text },
+                                            ]}
+                                        >
+                                            {event.participantCount || 0} / {event.capacity}
+                                        </Text>
+                                        {capacityPrediction?.severity === 'high' && (
+                                            <Text
+                                                style={{
+                                                    color: '#dc2626',
+                                                    fontSize: 12,
+                                                    marginTop: 2,
+                                                    fontWeight: '500',
+                                                }}
+                                            >
+                                                ⚠ Likely to exceed capacity
+                                            </Text>
+                                        )}
+                                        {capacityPrediction?.severity === 'medium' && (
+                                            <Text
+                                                style={{
+                                                    color: '#a16207',
+                                                    fontSize: 12,
+                                                    marginTop: 2,
+                                                    fontWeight: '500',
+                                                }}
+                                            >
+                                                ⚡ Approaching capacity
+                                            </Text>
+                                        )}
+                                    </View>
+                                </View>
+                            </>
+                        )}
                     </View>
 
                     {/* Tabs Navigation — Interactive */}
@@ -2181,7 +2280,24 @@ export default function EventDetail({ route, navigation }) {
                 <View style={[styles.fabContainer, { backgroundColor: theme.colors.surface }]}>
                     <View style={styles.fabSubInfo}>
                         <Text style={styles.fabLabel}>Attending</Text>
-                        <Text style={styles.fabValue}>{participantCount} People</Text>
+                        <View style={{ flexDirection: 'row', alignItems: 'baseline', gap: 6 }}>
+                            <Text style={styles.fabValue}>{participantCount} People</Text>
+                            {event?.capacity && (
+                                <Text
+                                    style={[
+                                        styles.fabValue,
+                                        { fontSize: 12, color: theme.colors.textSecondary },
+                                    ]}
+                                >
+                                    / {event.capacity}
+                                </Text>
+                            )}
+                        </View>
+                        {capacityPrediction?.severity === 'high' && (
+                            <Text style={{ color: '#dc2626', fontSize: 11, fontWeight: '600' }}>
+                                ⚠ Predicted overflow
+                            </Text>
+                        )}
                     </View>
 
                     <TouchableOpacity
