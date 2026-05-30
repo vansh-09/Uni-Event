@@ -1,7 +1,14 @@
 import { Ionicons } from '@expo/vector-icons';
 import DateTimePicker from '@react-native-community/datetimepicker';
 import * as ImagePicker from 'expo-image-picker';
-import { addDoc, collection, updateDoc, doc } from 'firebase/firestore';
+import {
+    collection,
+    updateDoc,
+    doc,
+    runTransaction,
+    increment,
+    serverTimestamp,
+} from 'firebase/firestore';
 import { getDownloadURL, ref, uploadBytes } from 'firebase/storage';
 import { useEffect, useMemo, useState } from 'react';
 import {
@@ -306,18 +313,57 @@ export default function CreateEvent({ navigation, route }) {
                 await updateDoc(doc(db, 'events', event.id), eventData);
                 Alert.alert('Success', 'Event Updated!');
             } else {
-                await addDoc(collection(db, 'events'), {
-                    ...eventData,
-                    participantCount: 0,
-                    branchCounts: {},
-                    yearCounts: {},
-                    participantsPreview: [],
-                    ownerId: user.uid,
-                    ownerEmail: user.email,
-                    organizerName: user.displayName || 'Club Admin',
-                    createdAt: new Date().toISOString(),
-                    status: 'active',
-                    appealStatus: null,
+                const eventRef = doc(collection(db, 'events'));
+                const attendancePlaceholderRef = doc(
+                    db,
+                    'events',
+                    eventRef.id,
+                    'attendance',
+                    'bootstrap',
+                );
+                const organizerRef = doc(db, 'users', user.uid);
+
+                await runTransaction(db, async transaction => {
+                    const organizerSnap = await transaction.get(organizerRef);
+
+                    transaction.set(eventRef, {
+                        ...eventData,
+                        participantCount: 0,
+                        branchCounts: {},
+                        yearCounts: {},
+                        participantsPreview: [],
+                        ownerId: user.uid,
+                        ownerEmail: user.email,
+                        organizerName: user.displayName || 'Club Admin',
+                        createdAt: serverTimestamp(),
+                        status: 'active',
+                        appealStatus: null,
+                    });
+
+                    transaction.set(attendancePlaceholderRef, {
+                        eventId: eventRef.id,
+                        ownerId: user.uid,
+                        type: 'bootstrap',
+                        checkInCount: 0,
+                        createdAt: serverTimestamp(),
+                        updatedAt: serverTimestamp(),
+                    });
+
+                    if (organizerSnap.exists()) {
+                        transaction.update(organizerRef, {
+                            'organizerStats.eventsCreated': increment(1),
+                            lastEventCreatedAt: serverTimestamp(),
+                        });
+                    } else {
+                        transaction.set(
+                            organizerRef,
+                            {
+                                organizerStats: { eventsCreated: 1 },
+                                lastEventCreatedAt: serverTimestamp(),
+                            },
+                            { merge: true },
+                        );
+                    }
                 });
                 Alert.alert('Success', 'Event Created!');
             }
