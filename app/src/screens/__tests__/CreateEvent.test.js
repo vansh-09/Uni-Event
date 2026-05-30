@@ -38,7 +38,6 @@ jest.mock('../../components/ScreenWrapper', () => {
 });
 
 jest.mock('../../components/PremiumInput', () => {
-    const React = require('react');
     const PropTypes = require('prop-types');
     const { TextInput, View, Text } = require('react-native');
 
@@ -139,14 +138,14 @@ const mockCollection = jest.fn((dbArg, ...segments) => ({
 }));
 
 const mockDoc = jest.fn((firstArg, ...segments) => {
-    if (firstArg && firstArg.__isCollectionRef && segments.length === 0) {
+    if (firstArg?.__isCollectionRef && segments.length === 0) {
         return { id: 'event_tx_1', path: `${firstArg.path}/event_tx_1` };
     }
 
     const parts = [...(typeof firstArg === 'string' ? [firstArg] : []), ...segments];
 
     return {
-        id: parts[parts.length - 1],
+        id: parts.at(-1),
         path: parts.join('/'),
     };
 });
@@ -160,7 +159,6 @@ jest.mock('firebase/firestore', () => ({
     serverTimestamp: (...args) => mockServerTimestamp(...args),
 }));
 
-import React from 'react';
 import { Alert } from 'react-native';
 import { fireEvent, render, waitFor } from '@testing-library/react-native';
 import CreateEvent from '../CreateEvent';
