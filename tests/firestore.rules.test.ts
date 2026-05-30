@@ -8,7 +8,7 @@ import {
     type TokenOptions,
 } from '@firebase/rules-unit-testing';
 
-import { deleteDoc, doc, setDoc, getDoc } from 'firebase/firestore';
+import { deleteDoc, doc, setDoc, getDoc, writeBatch, serverTimestamp } from 'firebase/firestore';
 
 let testEnv: Awaited<ReturnType<typeof initializeTestEnvironment>>;
 
@@ -59,13 +59,56 @@ describe('Firestore Security Rules', () => {
     });
 
     test('Club admin creates event -> allowed', async () => {
+        await seedDocument('users/clubAdmin1', { role: 'club' });
         const db = getFirestoreContext('clubAdmin1', { club: true });
-        await assertSucceeds(
-            setDoc(doc(db, 'events/event1'), {
-                title: 'Tech Fest',
-                ownerId: 'clubAdmin1',
-            }),
+
+        const batch = writeBatch(db);
+        batch.set(
+            doc(db, 'users/clubAdmin1'),
+            {
+                writeCountMinute: 1,
+                eventCountDay: 1,
+                lastWriteAt: serverTimestamp(),
+                lastEventDay: 20260530,
+            },
+            { merge: true },
         );
+        batch.set(doc(db, 'events/event1'), {
+            title: 'Tech Fest',
+            ownerId: 'clubAdmin1',
+        });
+
+        await assertSucceeds(batch.commit());
+    });
+
+    test('Club admin atomically creates event + attendance placeholder + organizer stats -> allowed', async () => {
+        await seedDocument('users/clubAdminAtomic', { role: 'club' });
+        const db = getFirestoreContext('clubAdminAtomic', { club: true });
+
+        const batch = writeBatch(db);
+        batch.set(
+            doc(db, 'users/clubAdminAtomic'),
+            {
+                writeCountMinute: 1,
+                eventCountDay: 1,
+                lastWriteAt: serverTimestamp(),
+                lastEventDay: 20260530,
+                organizerStats: { eventsCreated: 1 },
+            },
+            { merge: true },
+        );
+        batch.set(doc(db, 'events/eventAtomic1'), {
+            title: 'Atomic Event',
+            ownerId: 'clubAdminAtomic',
+        });
+        batch.set(doc(db, 'events/eventAtomic1/attendance/bootstrap'), {
+            eventId: 'eventAtomic1',
+            ownerId: 'clubAdminAtomic',
+            type: 'bootstrap',
+            checkInCount: 0,
+        });
+
+        await assertSucceeds(batch.commit());
     });
 
     test('Student tries to create event -> denied', async () => {
@@ -98,11 +141,11 @@ describe('Firestore Security Rules', () => {
         await assertFails(getDoc(doc(db, 'users/student2')));
     });
 
-    test("Club user cannot self-assign admin role -> denied", async () => {
-        await seedDocument("users/club1", { name: "Club User", role: "club" });
+    test('Club user cannot self-assign admin role -> denied', async () => {
+        await seedDocument('users/club1', { name: 'Club User', role: 'club' });
 
-        const db = getFirestoreContext("club1", { club: true });
-        await assertFails(setDoc(doc(db, "users/club1"), { role: "admin" }, { merge: true }));
+        const db = getFirestoreContext('club1', { club: true });
+        await assertFails(setDoc(doc(db, 'users/club1'), { role: 'admin' }, { merge: true }));
     });
 
     // ---------------- CLUBS ----------------
@@ -120,10 +163,21 @@ describe('Firestore Security Rules', () => {
     // ---------------- REMINDERS ----------------
 
     test('User creates own reminder -> allowed', async () => {
+        await seedDocument('users/student1', { role: 'student' });
         const db = getFirestoreContext('student1');
-        await assertSucceeds(
-            setDoc(doc(db, 'reminders/rem1'), { userId: 'student1', text: 'Attend seminar' }),
+
+        const batch = writeBatch(db);
+        batch.set(
+            doc(db, 'users/student1'),
+            {
+                writeCountMinute: 1,
+                lastWriteAt: serverTimestamp(),
+            },
+            { merge: true },
         );
+        batch.set(doc(db, 'reminders/rem1'), { userId: 'student1', text: 'Attend seminar' });
+
+        await assertSucceeds(batch.commit());
     });
 
     test('User creates reminder for another user -> denied', async () => {
@@ -209,36 +263,36 @@ describe('Firestore Security Rules', () => {
     });
 
     test("Student deletes another user's participant record -> denied", async () => {
-        await seedDocument("events/event1/participants/student2", { joined: true });
+        await seedDocument('events/event1/participants/student2', { joined: true });
 
-        const db = getFirestoreContext("student1");
-        await assertFails(deleteDoc(doc(db, "events/event1/participants/student2")));
+        const db = getFirestoreContext('student1');
+        await assertFails(deleteDoc(doc(db, 'events/event1/participants/student2')));
     });
 
     // ---------------- EVENT CHECK-INS ----------------
 
-    test("Club user writes event check-in -> allowed", async () => {
-        await seedDocument("events/event1", { title: "Tech Fest", ownerId: "clubOwner1" });
+    test('Club user writes event check-in -> allowed', async () => {
+        await seedDocument('events/event1', { title: 'Tech Fest', ownerId: 'clubOwner1' });
 
-        const db = getFirestoreContext("club1", { club: true });
+        const db = getFirestoreContext('club1', { club: true });
         await assertSucceeds(
-            setDoc(doc(db, "events/event1/checkIns/student1"), {
-                userId: "student1",
-                checkedInBy: "club1",
-                status: "checked-in",
+            setDoc(doc(db, 'events/event1/checkIns/student1'), {
+                userId: 'student1',
+                checkedInBy: 'club1',
+                status: 'checked-in',
             }),
         );
     });
 
-    test("Student writes event check-in -> denied", async () => {
-        await seedDocument("events/event1", { title: "Tech Fest", ownerId: "clubOwner1" });
+    test('Student writes event check-in -> denied', async () => {
+        await seedDocument('events/event1', { title: 'Tech Fest', ownerId: 'clubOwner1' });
 
-        const db = getFirestoreContext("student1");
+        const db = getFirestoreContext('student1');
         await assertFails(
-            setDoc(doc(db, "events/event1/checkIns/student1"), {
-                userId: "student1",
-                checkedInBy: "student1",
-                status: "checked-in",
+            setDoc(doc(db, 'events/event1/checkIns/student1'), {
+                userId: 'student1',
+                checkedInBy: 'student1',
+                status: 'checked-in',
             }),
         );
     });
@@ -284,7 +338,7 @@ describe('Firestore Security Rules', () => {
 
     test('Authenticated participant creates event message -> allowed', async () => {
         await seedDocument('events/event1/participants/student1', { joined: true }); // Make student1 a participant
-        
+
         const db = getFirestoreContext('student1');
         await assertSucceeds(setDoc(doc(db, 'events/event1/messages/msg1'), { text: 'Hello' }));
     });
@@ -295,58 +349,57 @@ describe('Firestore Security Rules', () => {
     });
 });
 // =========================================================================
-    // ISSUE #342: REGRESSION TESTS FOR NEW COLLECTIONS (Optimized)
-    // =========================================================================
+// ISSUE #342: REGRESSION TESTS FOR NEW COLLECTIONS (Optimized)
+// =========================================================================
 
-    const setupIssue342Data = async () => {
-        await seedDocument('events/event342', { title: 'Test Event', ownerId: 'eventOwner' });
-        // Root collections
-        await seedDocument('certificates/rootCert', { eventId: 'event342', userId: 'student1' });
-        await seedDocument('analytics/rootStat', { eventId: 'event342' });
-        // Subcollections
-        await seedDocument('events/event342/attendance/att1', { userId: 'student1' });
-        await seedDocument('events/event342/certificates/subCert', { userId: 'student1' });
-        await seedDocument('events/event342/analytics/subStat', { metrics: true });
-    };
+const setupIssue342Data = async () => {
+    await seedDocument('events/event342', { title: 'Test Event', ownerId: 'eventOwner' });
+    // Root collections
+    await seedDocument('certificates/rootCert', { eventId: 'event342', userId: 'student1' });
+    await seedDocument('analytics/rootStat', { eventId: 'event342' });
+    // Subcollections
+    await seedDocument('events/event342/attendance/att1', { userId: 'student1' });
+    await seedDocument('events/event342/certificates/subCert', { userId: 'student1' });
+    await seedDocument('events/event342/analytics/subStat', { metrics: true });
+};
 
-    // Define all our new paths and whether they have a specific 'user' owner
-    const newCollections = [
-        { name: 'root certificate', path: 'certificates/rootCert', hasOwner: true },
-        { name: 'root analytics', path: 'analytics/rootStat', hasOwner: false },
-        { name: 'event attendance', path: 'events/event342/attendance/att1', hasOwner: true },
-        { name: 'event certificates', path: 'events/event342/certificates/subCert', hasOwner: true },
-        { name: 'event analytics', path: 'events/event342/analytics/subStat', hasOwner: false }
-    ];
+// Define all our new paths and whether they have a specific 'user' owner
+const newCollections = [
+    { name: 'root certificate', path: 'certificates/rootCert', hasOwner: true },
+    { name: 'root analytics', path: 'analytics/rootStat', hasOwner: false },
+    { name: 'event attendance', path: 'events/event342/attendance/att1', hasOwner: true },
+    { name: 'event certificates', path: 'events/event342/certificates/subCert', hasOwner: true },
+    { name: 'event analytics', path: 'events/event342/analytics/subStat', hasOwner: false },
+];
 
-    // Dynamically generate the tests to satisfy SonarCloud duplication limits
-    newCollections.forEach(({ name, path, hasOwner }) => {
-        describe(`Access control for ${name}`, () => {
-            
-            test('Admin reads -> allowed', async () => {
-                await setupIssue342Data();
-                const db = getFirestoreContext('admin1', { admin: true });
-                await assertSucceeds(getDoc(doc(db, path)));
-            });
-
-            test('Event owner reads -> allowed', async () => {
-                await setupIssue342Data();
-                const db = getFirestoreContext('eventOwner');
-                await assertSucceeds(getDoc(doc(db, path)));
-            });
-
-            test('Unrelated user reads -> denied', async () => {
-                await setupIssue342Data();
-                const db = getFirestoreContext('unrelatedUser');
-                await assertFails(getDoc(doc(db, path)));
-            });
-
-            // This fixes the CodeRabbit missing test warning!
-            if (hasOwner) {
-                test('Document owner (student1) reads -> allowed', async () => {
-                    await setupIssue342Data();
-                    const db = getFirestoreContext('student1');
-                    await assertSucceeds(getDoc(doc(db, path)));
-                });
-            }
+// Dynamically generate the tests to satisfy SonarCloud duplication limits
+newCollections.forEach(({ name, path, hasOwner }) => {
+    describe(`Access control for ${name}`, () => {
+        test('Admin reads -> allowed', async () => {
+            await setupIssue342Data();
+            const db = getFirestoreContext('admin1', { admin: true });
+            await assertSucceeds(getDoc(doc(db, path)));
         });
+
+        test('Event owner reads -> allowed', async () => {
+            await setupIssue342Data();
+            const db = getFirestoreContext('eventOwner');
+            await assertSucceeds(getDoc(doc(db, path)));
+        });
+
+        test('Unrelated user reads -> denied', async () => {
+            await setupIssue342Data();
+            const db = getFirestoreContext('unrelatedUser');
+            await assertFails(getDoc(doc(db, path)));
+        });
+
+        // This fixes the CodeRabbit missing test warning!
+        if (hasOwner) {
+            test('Document owner (student1) reads -> allowed', async () => {
+                await setupIssue342Data();
+                const db = getFirestoreContext('student1');
+                await assertSucceeds(getDoc(doc(db, path)));
+            });
+        }
     });
+});
